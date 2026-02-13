@@ -1,0 +1,17 @@
+- [x] Criar baseline local a partir de `ManglerFTW/ComfyI2I` (fork/clone)
+- [x] Levantar estrutura atual do projeto e pontos de modernização
+- [x] Analisar issues do repositório original e extrair problemas prioritários
+- [x] Analisar referências: Inpaint-CropAndStitch, InpaintEasy, CRZnodes, rgthree, KJNodes, gligen-gui
+- [x] Definir arquitetura de modernização mantendo a ideia central do ComfyI2I
+- [x] Implementar modernizações dos nodes existentes (compatibilidade, qualidade, opções, robustez)
+- [x] Criar 5 novos nodes úteis e relevantes para fluxo de inpaint
+- [x] Validar código (execução, checks disponíveis, testes se existirem) - `compileall` executado; smoke runtime bloqueado por ausência de `torch` no ambiente atual
+- [x] Atualizar documentação (README e/ou docs de uso dos nodes)
+- [x] Atualizar `activities.md` com resumo do trabalho e estado atual
+- [x] Remover `install.bat`
+- [x] Remover fluxo de máscara automática por texto/CLIP do `Mask Ops`
+- [x] Melhorar qualidade de resize/colagem (incluindo `lanczos` real e anti-artefato)
+- [x] Criar node dedicado de alinhamento automático imagem+máscara
+- [x] Reforçar proteções anti-crash/OOM e comportamento seguro em batch/lista
+- [x] Atualizar documentação e `activities.md` após redesign adicional
+- [x] Remover dependências declaradas em `requirements.txt` por solicitação do usuário

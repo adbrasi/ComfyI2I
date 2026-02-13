@@ -8,9 +8,15 @@ import { ClipspaceDialog } from "../../extensions/core/clipspace.js";
 function addMenuHandler(nodeType, cb) {
 	const getOpts = nodeType.prototype.getExtraMenuOptions;
 	nodeType.prototype.getExtraMenuOptions = function () {
-		const r = getOpts.apply(this, arguments);
+		let result = [];
+		if (typeof getOpts === "function") {
+			const maybeResult = getOpts.apply(this, arguments);
+			if (Array.isArray(maybeResult)) {
+				result = maybeResult;
+			}
+		}
 		cb.apply(this, arguments);
-		return r;
+		return result;
 	};
 }
 
@@ -1632,7 +1638,7 @@ class ComfyShopDialog extends ComfyDialog {
 		const imageData = offscreenCtx.getImageData(0, 0, offscreen.width, offscreen.height);
 		
 		// Create a worker instance
-		const worker = new Worker("../../extensions/ComfyI2I/imageProcessorWorker.js");
+		const worker = new Worker(new URL("../../extensions/ComfyI2I/imageProcessorWorker.js", import.meta.url));
 	
 		// Sending imageData to worker
 		worker.postMessage({ imageData });
@@ -1713,12 +1719,21 @@ app.registerExtension({
 			};
 
 		const context_predicate = () => ComfyApp.clipspace && ComfyApp.clipspace.imgs && ComfyApp.clipspace.imgs.length > 0
-		ClipspaceDialog.registerButton("ComfyShop", context_predicate, callback);
+		try {
+			ClipspaceDialog.registerButton("ComfyShop", context_predicate, callback);
+		} catch (err) {
+			console.warn("[ComfyI2I] Unable to register Clipspace button.", err);
+		}
 	},
 
 	async beforeRegisterNodeDef(nodeType, nodeData, app) {
-		if (nodeData.output.includes("MASK") && nodeData.output.includes("IMAGE")) {
-			addMenuHandler(nodeType, function (_, options) {
+		const outputTypes = Array.isArray(nodeData?.output) ? nodeData.output : [];
+		if (outputTypes.includes("MASK") && outputTypes.includes("IMAGE")) {
+			addMenuHandler(nodeType, function (...args) {
+				const options = args.find((arg) => Array.isArray(arg));
+				if (!options) {
+					return;
+				}
 				options.unshift({
 					content: "Open in ComfyShop",
 					callback: () => {
