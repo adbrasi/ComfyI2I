@@ -265,27 +265,32 @@ def _split_connected_components(
     return stack, mapping
 
 
-def _simple_color_transfer_lab(source_bgr: np.ndarray, target_bgr: np.ndarray, mask: Optional[np.ndarray], strength: float) -> np.ndarray:
+def _simple_color_transfer_lab(
+    source_bgr: np.ndarray,
+    target_bgr: np.ndarray,
+    source_mask: Optional[np.ndarray],
+    target_mask: Optional[np.ndarray],
+    strength: float,
+) -> np.ndarray:
     src_lab = cv2.cvtColor(source_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
     tgt_lab = cv2.cvtColor(target_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
 
-    sel = None
-    if mask is not None and np.count_nonzero(mask > 0.01) > 16:
-        sel = mask > 0.01
+    src_sel = None
+    tgt_sel = None
+    if source_mask is not None and np.count_nonzero(source_mask > 0.01) > 16:
+        src_sel = source_mask > 0.01
+    if target_mask is not None and np.count_nonzero(target_mask > 0.01) > 16:
+        tgt_sel = target_mask > 0.01
 
     adjusted = src_lab.copy()
     for c in range(3):
         src_chan = src_lab[..., c]
         tgt_chan = tgt_lab[..., c]
 
-        if sel is None:
-            src_mean, src_std = float(src_chan.mean()), float(src_chan.std())
-            tgt_mean, tgt_std = float(tgt_chan.mean()), float(tgt_chan.std())
-        else:
-            src_mean = float(src_chan[sel].mean()) if np.any(sel) else float(src_chan.mean())
-            src_std = float(src_chan[sel].std()) if np.any(sel) else float(src_chan.std())
-            tgt_mean = float(tgt_chan[sel].mean()) if np.any(sel) else float(tgt_chan.mean())
-            tgt_std = float(tgt_chan[sel].std()) if np.any(sel) else float(tgt_chan.std())
+        src_mean = float(src_chan[src_sel].mean()) if src_sel is not None and np.any(src_sel) else float(src_chan.mean())
+        src_std = float(src_chan[src_sel].std()) if src_sel is not None and np.any(src_sel) else float(src_chan.std())
+        tgt_mean = float(tgt_chan[tgt_sel].mean()) if tgt_sel is not None and np.any(tgt_sel) else float(tgt_chan.mean())
+        tgt_std = float(tgt_chan[tgt_sel].std()) if tgt_sel is not None and np.any(tgt_sel) else float(tgt_chan.std())
 
         src_std = max(src_std, 1e-3)
         tgt_std = max(tgt_std, 1e-3)
@@ -363,7 +368,9 @@ def _combine_tensors(image1: torch.Tensor, image2: torch.Tensor, op: str, clamp_
         a = _repeat_to_batch(a, batch)
         b = _repeat_to_batch(b, batch)
 
-    if op == "union (max)":
+    if op == "mask_blend":
+        result = a
+    elif op == "union (max)":
         result = torch.max(a, b)
     elif op == "intersection (min)":
         result = torch.min(a, b)
@@ -536,6 +543,9 @@ class Mask_Ops:
                 "component_min_area": ("INT", {"default": 0, "min": 0, "max": MAX_RESOLUTION * MAX_RESOLUTION, "step": 1}),
                 "max_components": ("INT", {"default": 128, "min": 1, "max": 2048, "step": 1}),
                 "blend_percentage": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "blend_mode": (["global", "edge_band"], {"default": "global"}),
+                "edge_band_width": ("INT", {"default": 12, "min": 1, "max": 512, "step": 1}),
+                "edge_band_blur": ("FLOAT", {"default": 3.0, "min": 0.0, "max": 64.0, "step": 0.1}),
                 "black_level": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 255.0, "step": 0.1}),
                 "mid_level": ("FLOAT", {"default": 127.5, "min": 0.0, "max": 255.0, "step": 0.1}),
                 "white_level": ("FLOAT", {"default": 255.0, "min": 0.0, "max": 255.0, "step": 0.1}),
@@ -562,6 +572,9 @@ class Mask_Ops:
         component_min_area,
         max_components,
         blend_percentage,
+        blend_mode,
+        edge_band_width,
+        edge_band_blur,
         black_level,
         mid_level,
         white_level,
@@ -589,7 +602,20 @@ class Mask_Ops:
 
         chan_idx = {"red": 0, "green": 1, "blue": 2}[channel]
         channel_mask = image_rgb[..., chan_idx]
-        merged = (1.0 - blend_percentage) * base_mask + blend_percentage * channel_mask
+        if blend_percentage > 0:
+            mixed = (1.0 - blend_percentage) * base_mask + blend_percentage * channel_mask
+            if blend_mode == "edge_band":
+                region = (base_mask > 0.0).float()
+                outer = _dilate(region, int(edge_band_width))
+                inner = _erode(region, int(edge_band_width))
+                band = (outer - inner).clamp(0.0, 1.0)
+                if edge_band_blur > 0:
+                    band = _gaussian_blur_mask(band, edge_band_blur)
+                merged = base_mask * (1.0 - band) + mixed * band
+            else:
+                merged = mixed
+        else:
+            merged = base_mask
 
         merged = _apply_levels(merged, black_level, mid_level, white_level)
 
@@ -668,30 +694,43 @@ class Color_Correction:
         src = _repeat_to_batch(src, batch)
         tgt = _repeat_to_batch(tgt, batch)
 
-        mask_tensor = None
+        mask_tensor_src = None
         if mask is not None:
-            mask_tensor = tensor2mask(mask).float().clamp(0.0, 1.0)
-            mask_tensor = _repeat_to_batch(mask_tensor, batch)
-            if mask_tensor.shape[1] != src.shape[1] or mask_tensor.shape[2] != src.shape[2]:
-                mask_tensor = _resize_mask(mask_tensor, src.shape[2], src.shape[1], method="bilinear")
+            mask_tensor_src = tensor2mask(mask).float().clamp(0.0, 1.0)
+            mask_tensor_src = _repeat_to_batch(mask_tensor_src, batch)
+            if mask_tensor_src.shape[1] != src.shape[1] or mask_tensor_src.shape[2] != src.shape[2]:
+                mask_tensor_src = _resize_mask(mask_tensor_src, src.shape[2], src.shape[1], method="bilinear")
 
         out = []
         for i in range(batch):
             src_bgr = cv2.cvtColor((src[i].detach().cpu().numpy() * 255.0).astype(np.uint8), cv2.COLOR_RGB2BGR)
             tgt_bgr = cv2.cvtColor((tgt[i].detach().cpu().numpy() * 255.0).astype(np.uint8), cv2.COLOR_RGB2BGR)
 
-            m = None
-            if mask_tensor is not None:
-                m = mask_tensor[i].detach().cpu().numpy().astype(np.float32)
+            m_src = None
+            m_tgt = None
+            if mask_tensor_src is not None:
+                m_src = mask_tensor_src[i].detach().cpu().numpy().astype(np.float32)
+                if m_src.shape[0] != tgt_bgr.shape[0] or m_src.shape[1] != tgt_bgr.shape[1]:
+                    m_tgt = cv2.resize(m_src, (tgt_bgr.shape[1], tgt_bgr.shape[0]), interpolation=cv2.INTER_LINEAR)
+                else:
+                    m_tgt = m_src
                 if blur_radius > 0:
                     k = max(1, int(blur_radius) * 2 + 1)
-                    m = cv2.GaussianBlur(m, (k, k), max(blur_amount / 3.0, 1e-3))
-                    m = np.clip(m, 0.0, 1.0)
+                    m_src = cv2.GaussianBlur(m_src, (k, k), max(blur_amount / 3.0, 1e-3))
+                    m_tgt = cv2.GaussianBlur(m_tgt, (k, k), max(blur_amount / 3.0, 1e-3))
+                    m_src = np.clip(m_src, 0.0, 1.0)
+                    m_tgt = np.clip(m_tgt, 0.0, 1.0)
 
             if match_mode == "rgb_stats":
                 transferred = _simple_color_transfer_rgb(src_bgr, tgt_bgr, min(max(strength, 0.0), 2.0))
             else:
-                transferred = _simple_color_transfer_lab(src_bgr, tgt_bgr, m, min(max(strength, 0.0), 2.0))
+                transferred = _simple_color_transfer_lab(
+                    src_bgr,
+                    tgt_bgr,
+                    m_src,
+                    m_tgt,
+                    min(max(strength, 0.0), 2.0),
+                )
 
             if no_of_colors > 1:
                 transferred = _kmeans_quantize_lab(transferred, int(no_of_colors))
@@ -705,8 +744,8 @@ class Color_Correction:
             toned = _apply_tone_controls(transferred, gamma, contrast, brightness)
             rgb = cv2.cvtColor(toned, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
 
-            if m is not None:
-                m3 = np.repeat(m[:, :, None], 3, axis=2)
+            if m_src is not None:
+                m3 = np.repeat(m_src[:, :, None], 3, axis=2)
                 src_rgb = src[i].detach().cpu().numpy()
                 rgb = src_rgb * (1.0 - m3) + rgb * m3
 
@@ -930,7 +969,7 @@ class Combine_And_Paste_Op:
                 "Cut_Mask": ("IMAGE",),
                 "region": ("IMAGE",),
                 "color_xfer_factor": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 2.0, "step": 0.05}),
-                "op": (["union (max)", "intersection (min)", "difference", "multiply", "multiply_alpha", "add", "greater_or_equal", "greater"],),
+                "op": (["mask_blend", "multiply_alpha", "multiply", "union (max)", "intersection (min)", "difference", "add", "greater_or_equal", "greater"],),
                 "clamp_result": (["yes", "no"],),
                 "round_result": (["no", "yes"],),
                 "resize_behavior": (["resize", "keep_ratio_fill", "keep_ratio_fit", "source_size", "source_size_unmasked"],),
@@ -1465,6 +1504,8 @@ class I2IDetailPreserveBlend:
                 "original_image": ("IMAGE",),
                 "inpainted_image": ("IMAGE",),
                 "mask": ("MASK",),
+                "output_size": (["use_original", "use_inpainted"], {"default": "use_original"}),
+                "resize_method": (["nearest", "bilinear", "bicubic", "area", "lanczos"], {"default": "lanczos"}),
                 "detail_strength": ("FLOAT", {"default": 0.35, "min": 0.0, "max": 2.0, "step": 0.01}),
                 "color_strength": ("FLOAT", {"default": 0.2, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "mask_blur": ("FLOAT", {"default": 3.0, "min": 0.0, "max": 64.0, "step": 0.1}),
@@ -1476,7 +1517,17 @@ class I2IDetailPreserveBlend:
     FUNCTION = "blend"
     CATEGORY = "I2I/Advanced"
 
-    def blend(self, original_image, inpainted_image, mask, detail_strength, color_strength, mask_blur):
+    def blend(
+        self,
+        original_image,
+        inpainted_image,
+        mask,
+        output_size,
+        resize_method,
+        detail_strength,
+        color_strength,
+        mask_blur,
+    ):
         orig = tensor2rgb(original_image).float().clamp(0.0, 1.0)
         gen = tensor2rgb(inpainted_image).float().clamp(0.0, 1.0)
         m = tensor2mask(mask).float().clamp(0.0, 1.0)
@@ -1486,8 +1537,17 @@ class I2IDetailPreserveBlend:
         gen = _repeat_to_batch(gen, batch)
         m = _repeat_to_batch(m, batch)
 
-        if m.shape[1] != orig.shape[1] or m.shape[2] != orig.shape[2]:
-            m = _resize_mask(m, orig.shape[2], orig.shape[1], method="bilinear")
+        if output_size == "use_inpainted":
+            target_h, target_w = gen.shape[1], gen.shape[2]
+            if orig.shape[1] != target_h or orig.shape[2] != target_w:
+                orig = _resize_image(orig, target_w, target_h, resize_method)
+        else:
+            target_h, target_w = orig.shape[1], orig.shape[2]
+            if gen.shape[1] != target_h or gen.shape[2] != target_w:
+                gen = _resize_image(gen, target_w, target_h, resize_method)
+
+        if m.shape[1] != target_h or m.shape[2] != target_w:
+            m = _resize_mask(m, target_w, target_h, method="bilinear")
 
         if mask_blur > 0:
             m = _gaussian_blur_mask(m, mask_blur)

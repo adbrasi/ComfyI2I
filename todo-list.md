@@ -15,3 +15,9 @@
 - [x] Reforçar proteções anti-crash/OOM e comportamento seguro em batch/lista
 - [x] Atualizar documentação e `activities.md` após redesign adicional
 - [x] Remover dependências declaradas em `requirements.txt` por solicitação do usuário
+- [x] Corrigir `Color Transfer` para aceitar imagens de tamanhos diferentes sem erro de boolean index
+- [x] Corrigir `I2I Detail Preserve Blend` para suportar tamanhos diferentes sem broadcast error
+- [x] Melhorar `Mask Ops` com opção de blend local ao redor da máscara (além do modo global atual)
+- [x] Refinar `Combine and Paste` para comportamento mais previsível e opções mais úteis para inpaint
+- [x] Revisar entradas/saídas e remover ou ajustar o que não faz sentido prático
+- [x] Validar sintaxe e atualizar `README.md` + `activities.md` com as correções desta rodada
